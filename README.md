@@ -200,7 +200,3 @@ tests/test_retrieval.py::test_retrieval_latency_sla PASSED               [100%]
 ```
 
 ---
-
-## License
-
-This project is licensed under the MIT License.
