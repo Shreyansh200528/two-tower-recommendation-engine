@@ -1,0 +1,31 @@
+{
+  "experiment": "Run 1 - Baseline",
+  "epochs": 5,
+  "embedding_dim": 64,
+  "num_negatives": 4,
+  "learning_rate": 0.002,
+  "faiss": {
+    "hnsw_m": 32,
+    "efConstruction": 64,
+    "efSearch": 64,
+    "top_k": 100,
+    "avg_latency_ms": 0.098
+  },
+  "lightgbm": {
+    "train_samples": 100000,
+    "roc_auc": 0.8019
+  },
+  "metrics": {
+    "stage1_faiss_only": {
+      "HitRate@10": 0.2567,
+      "NDCG@10": 0.0384,
+      "Recall@10": 0.0379
+    },
+    "two_stage_pipeline": {
+      "HitRate@10": 0.2233,
+      "NDCG@10": 0.0399,
+      "Recall@10": 0.0341
+    },
+    "ndcg_relative_improvement": "+4.0%"
+  }
+}

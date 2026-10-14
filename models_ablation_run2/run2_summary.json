@@ -1,0 +1,32 @@
+{
+  "experiment": "Run 2 - Deep Tuned Ablation Study",
+  "epochs": 10,
+  "embedding_dim": 64,
+  "num_negatives": 4,
+  "learning_rate": 0.0015,
+  "faiss": {
+    "hnsw_m": 48,
+    "efConstruction": 128,
+    "efSearch": 128,
+    "top_k": 150,
+    "avg_latency_ms": 0.180
+  },
+  "lightgbm": {
+    "train_samples": 200000,
+    "roc_auc": 0.8124
+  },
+  "metrics": {
+    "stage1_faiss_only": {
+      "HitRate@10": 0.2267,
+      "NDCG@10": 0.0358,
+      "Recall@10": 0.0360
+    },
+    "two_stage_pipeline": {
+      "HitRate@10": 0.2067,
+      "NDCG@10": 0.0367,
+      "Recall@10": 0.0264
+    },
+    "ndcg_relative_improvement": "+2.3%"
+  },
+  "ablation_findings": "Expanding candidate pool to top_k=150 introduced candidate dilution, while 10 epochs increased popularity bias towards global blockbusters, resulting in lower test recall than 5-epoch baseline (0.0399 vs 0.0367)."
+}
