@@ -1,147 +1,206 @@
-# Two-Tower Recommendation Engine with FAISS & Two-Stage Ranking
+# Two-Tower Recommendation Engine with FAISS HNSW & LightGBM Re-Ranking
 
-An industrial-grade, two-stage recommendation pipeline built on the **MovieLens-1M** benchmark (1M+ ratings, 6,040 users, 3,883 movies). Combines deep dual-encoder representation learning, sub-millisecond approximate nearest neighbor (ANN) vector search, and gradient-boosted decision tree re-ranking.
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![FAISS](https://img.shields.io/badge/FAISS-HNSW_Vector_Search-008080)](https://github.com/facebookresearch/faiss)
+[![LightGBM](https://img.shields.io/badge/LightGBM-4.0+-brightgreen)](https://github.com/microsoft/LightGBM)
+[![Tests](https://img.shields.io/badge/Tests-16%20Passed-success)](tests/)
+
+An industrial-grade, two-stage recommendation system built on the **MovieLens-1M** benchmark (1,000,209 ratings across 6,040 users and 3,883 movies). The architecture decouples large-scale candidate retrieval from high-precision personalized re-ranking, achieving **sub-0.1ms retrieval latency** and a **+4.0% relative improvement in NDCG@10**.
 
 ---
 
 ## Architecture Overview
 
+Modern production recommendation engines (e.g., YouTube, Netflix, Instagram) cannot score an entire catalog of millions of items in real time. This system implements an industry-standard **two-stage funnel architecture**:
+
 ```
-                      [User Request: User ID + Demographics]
-                                         │
-                                         ▼
+                       [Incoming Request: User ID / Demographics]
+                                          │
+                                          ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│               STAGE 1: CANDIDATE RETRIEVAL (Two-Tower + FAISS)                  │
+│               STAGE 1: CANDIDATE RETRIEVAL (Two-Tower + FAISS HNSW)             │
 │                                                                                 │
-│  User Demographics ──► [User Tower (PyTorch)] ──► 64-dim User Vector u         │
+│  User Demographics ──► [User Tower (PyTorch)] ──► 64-dim Vector u               │
 │                                                          │                      │
 │                                                          ▼                      │
 │                                             [FAISS HNSW Vector Index]           │
 │                                              (3,883 Movie Vectors v)            │
 │                                                          │                      │
-│                                             Sub-millisecond Search              │
-│                                             (Avg Latency: 0.098 ms)             │
+│                                              Latency: 0.098 ms / query          │
 │                                                          │                      │
 │                                                          ▼                      │
 │                                                 Top 100 Candidates              │
 └────────────────────────────────────────┬────────────────────────────────────────┘
                                          │
+                        [Seen-Item Deduplication Filter]
+                                         │
                                          ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                    STAGE 2: RE-RANKING (LightGBM Ranker)                        │
 │                                                                                 │
-│  Features:                                                                      │
-│   • Two-Tower Cosine Retrieval Score                                            │
-│   • User Profile Statistics (Activity count, mean rating, rating variance)      │
-│   • Item Profile Statistics (Popularity, mean rating, variance)                 │
-│   • Explicit Genre Affinity (Overlap with user top-3 preferred genres)          │
+│  Feature Engineering:                                                           │
+│   • Semantic Cosine Retrieval Similarity                                        │
+│   • User Profile Statistics (Activity volume, historical mean rating & variance)│
+│   • Item Profile Statistics (Popularity, historical mean rating & variance)     │
+│   • Cross-Affinity: Rating differential & User-Top-3-Genre overlap              │
 │                                         │                                       │
 │                                         ▼                                       │
-│                           [LightGBM Decision Trees]                             │
+│                           [LightGBM Boosted Trees]                              │
 │                           (Training ROC-AUC: 0.8019)                            │
 │                                         │                                       │
 │                                         ▼                                       │
-│                         Top 10 Final Recommendations                            │
-│                       (+4.0% NDCG@10 gain over Stage 1)                         │
+│                          Top 10 Personalized Recommendations                    │
+│                        (+4.0% NDCG@10 Gain over Retrieval)                      │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
+## Key System Features
+
+* **Dual-Encoder Representation Learning:** Separate PyTorch neural towers for users (embedding demographic features: age, gender, occupation) and items (embedding item IDs and multi-hot genre vectors), projecting both into a shared, L2-normalized 64-dimensional space.
+* **Sub-Millisecond Vector Search:** Approximate Nearest Neighbor (ANN) search powered by Meta FAISS using a **Hierarchical Navigable Small World (HNSW)** proximity graph ($\mathcal{O}(\log N)$ query complexity).
+* **Strict Temporal Partitioning:** Users' interactions are partitioned chronologically (earliest 80% train, latest 20% test per user), strictly eliminating future data leakage.
+* **Deduplication & Novelty Filtering:** Candidates previously interacted with by a user are dynamically filtered prior to re-ranking to guarantee 100% catalog novelty during inference.
+* **Two-Tier Cold-Start Architecture:**
+  * **Tier 1 (Demographic Warm Fallback):** New users with demographic metadata are assigned a population-mean user vector combined with their demographic embeddings, retrieving demographic-cluster favorites in sub-millisecond latency.
+  * **Tier 2 (Pure Anonymous Fallback):** Anonymous guest requests default to an **IMDb-style Bayesian Weighted Rating**:
+    $$WR = \left(\frac{v}{v + m}\right) R + \left(\frac{m}{v + m}\right) C$$
+    where $m$ is the 80th-percentile minimum vote threshold ($\approx 250$ votes) and $C$ is the catalog mean ($\approx 3.58$), suppressing low-sample rating noise.
+
+---
+
 ## Benchmark Results
 
-| Stage / Component | Metric | Value |
+Evaluated across held-out chronological test sets over 300 active users:
+
+| Component | Metric | Performance |
 | :--- | :--- | :--- |
-| **Stage 1: Retrieval Latency** | FAISS HNSW Query Time | **0.098 ms** / query |
-| **Stage 1: Vector Space** | Embedding Dimension | 64-dim L2-normalized |
-| **Stage 2: Re-Ranker Quality** | LightGBM ROC-AUC | **0.8019** |
-| **Two-Stage Pipeline vs Stage 1** | **NDCG@10 Improvement** | **+4.0% relative gain** |
-| **Stage 1 HitRate** | HitRate@10 (strict test set) | 25.67% |
+| **Stage 1 Retrieval Latency** | FAISS HNSW (`M=32`, `efSearch=64`) | **0.098 ms** / query |
+| **Stage 1 Exact Flat Latency** | Brute-force Inner Product | **0.127 ms** / query |
+| **Stage 1 Representation** | Embedding Dimensionality | 64-dim (L2-normalized) |
+| **Stage 2 Discriminative Power** | LightGBM Re-Ranker ROC-AUC | **0.8019** |
+| **Stage 1 HitRate** | HitRate@10 (strict hold-out) | **25.67%** |
+| **End-to-End Ranking Gain** | **NDCG@10 Improvement (Stage 2 vs. Stage 1)** | **+4.0% relative gain** |
 
 ---
 
-## Hyperparameter Ablation Study (Run 1 vs. Run 2)
+## Hyperparameter Ablation Study
 
-To evaluate the engineering trade-offs between training duration, index complexity, and ranking accuracy, an ablation experiment was performed comparing the production baseline against a deep-tuned configuration:
+To evaluate architectural trade-offs between compute footprint, index complexity, and ranking accuracy, an ablation experiment was conducted comparing the production configuration against a higher-capacity setup:
 
-| Parameter / Metric | Production Baseline (Run 1) | Deep-Tuned Ablation (Run 2) | Engineering Finding |
+| Parameter / Metric | Production Pipeline (Run 1) | High-Capacity Ablation (Run 2) | Analysis & Trade-Off |
 | :--- | :---: | :---: | :--- |
-| **Training Epochs** | `5` | `10` | 5 epochs achieved the optimal generalization frontier; 10 epochs began memorizing co-occurrences. |
-| **Candidate Pool (`top_k`)** | `100` | `150` | Expanding to 150 items introduced **candidate dilution**, degrading test NDCG from 0.0399 to 0.0367. |
-| **HNSW Complexity (`m / ef`)** | `32 / 64` | `48 / 128` | Doubling graph connectivity increased search latency ($0.098 \to 0.180$ ms) with no recall advantage. |
-| **LightGBM Training Set** | `100,000` | `200,000` | Larger sample induced popularity bias towards global blockbusters over niche personalized relevance. |
-| **Two-Stage NDCG@10** | **0.0399** | `0.0367` | **Run 1 outperforms Run 2 by +8.7% in ranking accuracy.** |
-| **Relative NDCG Gain** | **+4.0%** | `+2.3%` | Stage-2 re-ranking adds higher marginal utility when filtering 100 clean candidates. |
-| **Average Query Latency** | **0.098 ms** | `0.180 ms` | **Run 1 is 1.8x faster** and well within production SLAs (<10 ms). |
-
-> **Conclusion:** Run 1 was locked in as the official production system because it maximizes ranking performance while delivering sub-0.1ms retrieval latency.
+| **Training Epochs** | `5` | `10` | 5 epochs achieved optimal generalization; 10 epochs induced slight co-occurrence overfitting. |
+| **Candidate Pool (`top_k`)** | `100` | `150` | Expanding retrieval to 150 items introduced **candidate dilution**, degrading test NDCG from 0.0399 to 0.0367. |
+| **HNSW Complexity (`M / ef`)** | `32 / 64` | `48 / 128` | Higher graph density increased latency ($0.098 \to 0.180$ ms) with no measurable recall gain on this catalog size. |
+| **LightGBM Training Set** | `100,000` pairs | `200,000` pairs | Doubling samples increased popularity bias toward global blockbusters over personalized niche relevance. |
+| **Two-Stage NDCG@10** | **0.0399** | `0.0367` | **Run 1 delivers an +8.7% higher ranking accuracy.** |
+| **Relative NDCG Gain** | **+4.0%** | `+2.3%` | Stage 2 provides higher marginal utility when operating on cleaner, top-100 candidates. |
+| **Retrieval Query Latency** | **0.098 ms** | `0.180 ms` | **Run 1 is 1.8x faster**, preserving headroom for downstream feature extraction. |
 
 ---
 
-## Directory Structure
+## Project Structure
 
 ```
 two_tower_recsys/
-├── .env                          # Configuration variables
-├── .gitignore                    # Ignored artifacts and caches
-├── README.md                     # Documentation and interview cheat-sheet
 ├── data/
 │   └── ml-1m/                    # MovieLens-1M dataset
 ├── models/
-│   ├── two_tower.pt              # PyTorch trained weights
-│   ├── faiss_hnsw.index          # Built HNSW vector graph index
-│   └── lightgbm_reranker.txt     # LightGBM booster model
+│   ├── two_tower.pt              # Trained PyTorch dual-tower weights
+│   ├── faiss_hnsw.index          # Serialized HNSW graph index
+│   └── lightgbm_reranker.txt     # Serialized LightGBM booster
+├── models_baseline_run1/         # Archived Run 1 production artifacts & metrics
+├── models_ablation_run2/         # Archived Run 2 ablation artifacts & metrics
 ├── notebooks/
-│   └── two_tower_demo.ipynb      # Interactive VS Code notebook demo
-└── src/
-    ├── data_preprocessing.py     # Temporal splitting & negative sampling
-    ├── two_tower_model.py        # PyTorch User & Item Towers
-    ├── vector_search.py          # FAISS HNSW indexing & latency benchmarks
-    ├── reranker.py               # Feature engineering & LightGBM ranker
-    ├── evaluate.py               # HitRate@K, NDCG@K, Recall@K metrics
-    ├── train_pipeline.py         # End-to-end training and benchmark script
-    └── interactive_inference.py  # Live CLI query tool for any user
+│   └── two_tower_demo.ipynb      # Interactive step-by-step walkthrough
+├── src/
+│   ├── cold_start.py             # 2-Tier demographic & Bayesian fallback handlers
+│   ├── data_preprocessing.py     # Temporal partitioning, ID mapping & negative sampling
+│   ├── evaluate.py               # Vectorized HitRate@K, NDCG@K, Recall@K evaluators
+│   ├── interactive_inference.py  # Production CLI inference entry-point
+│   ├── reranker.py               # Feature extraction & LightGBM ranking engine
+│   ├── train_pipeline.py         # End-to-end training, indexing & benchmarking script
+│   ├── two_tower_model.py        # PyTorch User & Item Tower architectures
+│   └── vector_search.py          # FAISS HNSW build, query & latency benchmarks
+├── tests/
+│   ├── test_data.py              # Temporal split zero-leakage & negative sampling tests
+│   ├── test_models.py            # Tensor shapes, strict L2-normalization & boundary tests
+│   ├── test_pipeline.py          # Feature schema, score bounds & cold-start tests
+│   └── test_retrieval.py         # FAISS catalog integrity & <1.5ms latency SLA tests
+├── .env                          # Pipeline configuration variables
+├── .gitignore                    # Git tracking ignore rules
+├── requirements.txt              # Pinned environment dependencies
+└── README.md                     # System documentation
 ```
 
 ---
 
-## Quick Usage
+## Getting Started
 
-### 1. Run Interactive Recommendations for Any User
-Test the two-stage pipeline on any user ID:
+### 1. Installation
+
 ```bash
-# Known user (Full Two-Stage Pipeline)
+# Clone the repository
+git clone https://github.com/<YOUR_USERNAME>/two-tower-recsys.git
+cd two-tower-recsys
+
+# Create and activate virtual environment
+python -m venv .venv
+source .venv/bin/activate       # On Linux/macOS
+# .\.venv\Scripts\Activate.ps1  # On Windows PowerShell
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### 2. Interactive Recommendation Inference
+
+```bash
+# Known User (Full Two-Stage Pipeline with Seen-Item Deduplication)
 python src/interactive_inference.py --user_id 42 --top_k 5
 
-# Cold-Start Tier 1: Demographic Cluster Retrieval (Unknown user with demographics)
+# Cold-Start Tier 1: Demographic Warm Retrieval (Unknown User with Demographics)
 python src/interactive_inference.py --user_id 9999 --gender F --age 18-24 --top_k 5
 
-# Cold-Start Tier 2: Pure Anonymous Fallback (IMDb Bayesian Weighted Rating)
+# Cold-Start Tier 2: Pure Anonymous Fallback (IMDb Bayesian Weighted Classics)
 python src/interactive_inference.py --user_id 9999 --top_k 5
 ```
 
-### 2. Run the Interactive Jupyter Notebook
-Open [`notebooks/two_tower_demo.ipynb`](file:///D:/Users/shrey/desktop/res/two_tower_recsys/notebooks/two_tower_demo.ipynb) inside VS Code and select `.venv` as your Python kernel.
+### 3. Automated Test Suite
+
+Run the full pytest test suite covering embedding invariants, latency SLAs, temporal leakage prevention, and pipeline integration:
+
+```bash
+pytest tests/ -v
+```
+
+All 16 unit and integration tests execute in $\sim 5$ seconds:
+
+```text
+tests/test_data.py::test_temporal_split_zero_data_leakage PASSED         [  6%]
+tests/test_data.py::test_negative_sampling_disjoint_from_positives PASSED [ 12%]
+tests/test_data.py::test_feature_indices_continuity PASSED               [ 18%]
+tests/test_models.py::test_user_tower_output_shape PASSED                [ 25%]
+tests/test_models.py::test_item_tower_output_shape PASSED                [ 31%]
+tests/test_models.py::test_user_embeddings_l2_normalized PASSED          [ 37%]
+tests/test_models.py::test_item_embeddings_l2_normalized PASSED          [ 43%]
+tests/test_models.py::test_edge_case_user_and_movie_ids PASSED           [ 50%]
+tests/test_pipeline.py::test_feature_engineering_schema_and_types PASSED [ 56%]
+tests/test_pipeline.py::test_reranker_probability_bounds PASSED          [ 62%]
+tests/test_pipeline.py::test_end_to_end_recommendation_pipeline PASSED   [ 68%]
+tests/test_pipeline.py::test_cold_start_tier2_bayesian_fallback PASSED   [ 75%]
+tests/test_pipeline.py::test_cold_start_tier1_demographic_cluster PASSED [ 81%]
+tests/test_retrieval.py::test_faiss_index_total_items PASSED             [ 87%]
+tests/test_retrieval.py::test_top_k_uniqueness_and_validity PASSED       [ 93%]
+tests/test_retrieval.py::test_retrieval_latency_sla PASSED               [100%]
+============================== 16 passed in 4.84s ==============================
+```
 
 ---
 
-## Production Cold-Start Strategy
+## License
 
-In real-world deployment, dropping user traffic because an ID is unrecognized is unacceptable. The pipeline implements a 2-tier fallback architecture:
-
-1. **Tier 1 — Demographic Warm Cold-Start:** When an unknown user provides profile metadata upon registration (Gender, Age, Occupation), their vector is generated by pairing the global population-mean user vector with their specific demographic embeddings (`UserTower.forward_demographic`). FAISS searches the movie vector space for this demographic cluster in sub-millisecond latency.
-2. **Tier 2 — Pure Anonymous Cold-Start:** For guest/unregistered users without demographic attributes, the system falls back to an **IMDb-style Bayesian Weighted Rating**:
-   $$WR = \left(\frac{v}{v + m}\right) \cdot R + \left(\frac{m}{v + m}\right) \cdot C$$
-   where $v$ is vote count, $m$ is the 80th-percentile minimum vote threshold, $R$ is item mean rating, and $C$ is the global catalog mean ($\approx 3.58$). This guarantees high-prestige, high-consensus classics (*The Shawshank Redemption*, *The Godfather*) are served rather than noisy items with 1 single 5-star vote.
-
----
-
-## Interview Defense Cheat-Sheet
-
-| Question | Defensible Answer |
-| :--- | :--- |
-| **Why not just rank all movies with one complex model?** | *"Scoring all 50,000+ items with complex cross-features violates real-time SLAs (<50ms). We decouple the pipeline into high-recall candidate retrieval via FAISS (<0.1ms) and high-precision re-ranking via LightGBM on the top-100 candidates."* |
-| **How do you avoid data leakage during training?** | *"We performed a chronological temporal split per user: earlier 80% ratings for training, latest 20% for testing. Random 80/20 splitting leaks future interactions into past predictions."* |
-| **Why HNSW over exact search?** | *"Exact search scales linearly $\mathcal{O}(N \cdot d)$, whereas HNSW is a multi-layer proximity graph with logarithmic $\mathcal{O}(\log N)$ query complexity, achieving sub-millisecond retrieval."* |
-| **Why use NDCG instead of just Accuracy?** | *"Recommendations are ranked lists. NDCG uses a logarithmic position discount: predicting a hit at Rank 1 is penalized much less than predicting it at Rank 10."* |
-| **How does your system handle Cold-Start?** | *"We implement a 2-tier fallback: if demographics are supplied, we pass the demographic embeddings through the User Tower with a population-mean user anchor for FAISS retrieval. If zero profile info exists, we fall back to a Bayesian Weighted Rating (Dirichlet/IMDb formula) to serve consensus classics without popularity noise."* |
+This project is licensed under the MIT License.
